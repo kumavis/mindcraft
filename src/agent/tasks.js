@@ -65,6 +65,7 @@ export class TaskManager {
             // also tell agent.bot to stop various actions
             if (this.executing) {
                 console.log(`new task "${taskLabel}" trying to interrupt current task "${this.currentTaskLabel}"`);
+                this.agent.bot.emit('task:interrupt', { current: this.currentTaskLabel, new: taskLabel });
             }
             await this.stop();
 
@@ -81,7 +82,9 @@ export class TaskManager {
             }
 
             // start the task
+            this.agent.bot.emit('task:start', taskLabel);
             await taskFn();
+            this.agent.bot.emit('task:end', taskLabel);
 
             // mark task as finished + cleanup
             this.executing = false;
@@ -103,6 +106,8 @@ export class TaskManager {
             // return task status report
             return { success: true, message: output, interrupted, timedout };
         } catch (err) {
+            this.agent.bot.emit('task:end', taskLabel);
+            this.agent.bot.emit('task:error', { task: taskLabel, error: err });
             this.executing = false;
             this.currentTaskLabel = '';
             this.currentTaskFn = null;
@@ -141,6 +146,7 @@ export class TaskManager {
             console.warn(`Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
             this.timedout = true;
             this.agent.history.add('system', `Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
+            this.agent.bot.emit('task:timeout', this.currentTaskLabel);
             await this.stop(); // last attempt to stop
         }, TIMEOUT_MINS * 60 * 1000);
     }
