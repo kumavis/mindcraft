@@ -1,129 +1,162 @@
+import { makePromiseKit, makeTimeoutReject } from "./library/promise-kit.js";
+export class ResumeFromStartTask {
+    constructor(label, taskFn) {
+        this.label = label;
+        this.resultLog = '';
+        this._taskFn = taskFn;
+        this._promiseKit = makePromiseKit();
+    }
+
+    start () {
+        this._promiseKit.resolve(this._taskFn());
+        return this._promiseKit.promise;
+    }
+
+    pause () {
+        // no way to trigger a stop for this task
+        return this._promiseKit.promise;
+    }
+
+    resume () {
+        // this._taskPromise = Promise.resolve(this._taskFn());
+        // return this._taskPromise;
+        throw Error('Cannot resume a task that has already started.');
+    }
+
+    whenDone () {
+        return this._promiseKit.promise;
+    }
+
+}
+
 export class TaskManager {
     constructor(agent) {
         this.agent = agent;
         this.executing = false;
-        this.currentTaskLabel = '';
-        this.currentTaskFn = null;
-        this.timedout = false;
-        this.resume_func = null;
-        this.resume_name = '';
+        // this.currentTaskLabel = '';
+        // this.currentTaskFn = null;
+        // this.timedout = false;
+        // this.resume_func = null;
+        // this.resume_name = '';
+        this.taskQueue = [];
     }
 
+    // TODO: remove
     async resumeTask(taskFn, timeout) {
-        return this._executeResume(taskFn, timeout);
+        if (taskFn) {
+            return this.runTask('(resume)', taskFn, { timeout, resume: true });
+        } else {
+            return this.start();
+        }
     }
 
     async runTask(taskLabel, taskFn, { timeout, resume = false } = {}) {
-        if (resume) {
-            return this._executeResume(taskFn, timeout);
-        } else {
-            return this._executeTask(taskLabel, taskFn, timeout);
-        }
+        // const task = {
+        //     label: taskLabel,
+        //     start: taskFn,
+        //     timeout: timeout,
+        //     resumable: resume
+        // };
+        // if (resume) {
+        //     const task = new ResumeFromStartTask(taskLabel, taskFn);
+        //     return this._executeResume(taskFn, timeout);
+        // } else {
+        const task = new ResumeFromStartTask(taskLabel, taskFn);
+        return this._executeTask(task);
+        // }
     }
 
     async stop() {
         if (!this.executing) return;
-        console.trace();
-        const start = Date.now();
-        while (this.executing) {
-            this.agent.interruptBot();
-            console.log('waiting for code to finish executing...');
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            if (Date.now() - start > 10 * 1000) {
-                this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
-            }
+        const task = this.getCurrentTask()
+        if (!task) return;
+        // update task log
+        task.resultLog += this.agent.captureBotLogs();
+        this.agent.bot.emit('task:pause', task.label);
+        try {
+            // attempt graceful stop with 10 seconds timeout
+            await Promise.race([
+                task.pause(),
+                makeTimeoutReject(10 * 1000, 'Task failed to gracefully stop after 10 seconds.'),
+            ]);
+        } catch (err) {
+            console.error(err);
+            this.agent.bot.emit('task:interrupt', task.label);
+            this.agent.cleanKill(`${err.message} Killing process.`);
+            return;
+        } finally {
+            this.executing = false;
+            // this.agent.bot.emit('task:end', task.label);
         }
     }
 
     cancelResume() {
-        this.resume_func = null;
-        this.resume_name = null;
+        console.log('Cancel resume requested (ignored).');
     }
 
-    async _executeResume(taskFn = null, timeout = 10) {
-        const new_resume = taskFn != null;
-        if (new_resume) { // start new resume
-            this.resume_func = taskFn;
-            this.resume_name = this.currentTaskLabel;
-        }
-        if (this.resume_func != null && this.agent.isIdle() && (!this.agent.self_prompter.on || new_resume)) {
-            this.currentTaskLabel = this.resume_name;
-            let res = await this._executeTask(this.resume_name, this.resume_func, timeout);
-            this.currentTaskLabel = '';
-            return res;
-        } else {
-            return { success: false, message: null, interrupted: false, timedout: false };
-        }
+    start () {
+        if (this.executing) return;
+        this._startNextTask();
     }
 
-    async _executeTask(taskLabel, taskFn, timeout = 10) {
-        let TIMEOUT;
-        try {
-            console.log('executing code...\n');
+    getCurrentTask() {
+        return this.taskQueue[0];
+    }
 
-            // await current task to finish (executing=false), with 10 seconds timeout
-            // also tell agent.bot to stop various actions
-            if (this.executing) {
-                console.log(`new task "${taskLabel}" trying to interrupt current task "${this.currentTaskLabel}"`);
-                this.agent.bot.emit('task:interrupt', { current: this.currentTaskLabel, new: taskLabel });
-            }
-            await this.stop();
-
-            // clear bot logs and reset interrupt code
-            this.agent.clearBotLogs();
-
-            this.executing = true;
-            this.currentTaskLabel = taskLabel;
-            this.currentTaskFn = taskFn;
-
-            // timeout in minutes
-            if (timeout > 0) {
-                TIMEOUT = this._startTimeout(timeout);
-            }
-
-            // start the task
-            this.agent.bot.emit('task:start', taskLabel);
-            await taskFn();
-            this.agent.bot.emit('task:end', taskLabel);
-
-            // mark task as finished + cleanup
-            this.executing = false;
-            this.currentTaskLabel = '';
-            this.currentTaskFn = null;
-            clearTimeout(TIMEOUT);
-
-            // get bot activity summary
-            let output = this._getBotOutputSummary();
-            let interrupted = this.agent.bot.interrupt_code;
-            let timedout = this.timedout;
-            this.agent.clearBotLogs();
-
-            // if not interrupted and not generating, emit idle event
-            if (!interrupted && !this.agent.coder.generating) {
-                this.agent.bot.emit('idle');
-            }
-
-            // return task status report
-            return { success: true, message: output, interrupted, timedout };
-        } catch (err) {
-            this.agent.bot.emit('task:end', taskLabel);
-            this.agent.bot.emit('task:error', { task: taskLabel, error: err });
-            this.executing = false;
-            this.currentTaskLabel = '';
-            this.currentTaskFn = null;
-            clearTimeout(TIMEOUT);
-            this.cancelResume();
-            console.error("Code execution triggered catch: " + err);
-            await this.stop();
-
-            let message = this._getBotOutputSummary() + '!!Code threw exception!!  Error: ' + err;
-            let interrupted = this.agent.bot.interrupt_code;
-            this.agent.clearBotLogs();
-            if (!interrupted && !this.agent.coder.generating) {
-                this.agent.bot.emit('idle');
-            }
-            return { success: false, message, interrupted, timedout: false };
+    _taskHasCompleted (task) {
+        this.agent.bot.emit('task:end', task.label);
+        // we're done executing
+        this.executing = false;
+        // remove task
+        const taskIndex = this.taskQueue.indexOf(task);
+        if (taskIndex !== -1) {
+            this.taskQueue.splice(taskIndex, 1);
         }
+        // announce idle if no more tasks
+        if (this.taskQueue.length === 0) {
+            this.agent.bot.emit('idle');
+            return;
+        }
+        this._startNextTask();
+    }
+
+    _startNextTask() {
+        if (this.executing) {
+            throw Error('Cannot start next task while current task is executing.');
+        }
+        if (this.taskQueue.length === 0) {
+            return;
+        }
+        this.executing = true;
+        const task = this.getCurrentTask();
+        this.agent.bot.emit('task:start', task.label);
+        this.agent.clearBotLogs();
+        task.start()
+            .catch((err) => {
+                console.error(err);
+                this.agent.bot.emit('task:error', { task: task.label, error: err });
+                this.agent.cleanKill(`Task Failed: ${err.message}. Killing process.`);
+            })
+            .finally(() => {
+                this._taskHasCompleted(task);
+            });
+    }
+
+    async _executeTask(task) {
+        if (this.executing) {
+            await this.stop();
+        }
+        this.taskQueue.unshift(task);
+        this._startNextTask();
+        return task.whenDone()
+            .then(() => {
+                task.resultLog += this.agent.captureBotLogs();
+                console.log('Task done:', task.label, task.resultLog);
+                return { success: true, message: task.resultLog, interrupted: false, timedout: false };
+            })
+            .catch((err) => {
+                return { success: false, message: null, interrupted: false, timedout: false };
+            });
     }
 
     _getBotOutputSummary() {

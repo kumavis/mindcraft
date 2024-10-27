@@ -89,7 +89,7 @@ export class Coder {
     }
 
     async generateCodeLoop(agent_history) {
-        this.agent.bot.modes.pause('unstuck');
+        // this.agent.bot.modes.pause('unstuck');
 
         let messages = agent_history.getHistory();
         messages.push({role: 'system', content: 'Code generation started. Write code in codeblock in your response:'});

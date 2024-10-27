@@ -1,12 +1,86 @@
 import * as skills from '../library/skills.js';
+import { makePauseableActions } from '../library/pausable.js';
 import settings from '../../../settings.js';
+import { makePromiseKit } from '../library/promise-kit.js';
+import { SelfPrompter } from '../self_prompter.js';
 
-function runAsTask (taskLabel, taskFn, resume = false, timeout = -1) {
-    return async function (agent, ...args) {
-        const taskFnWithAgent = async () => {
-            await taskFn(agent, ...args);
+
+function makeActionTaskRunnerPauseable (taskLabel, taskFn) {
+    return async (agent, ...args) => {
+        // build task
+        const pauseable = makePauseableActions(skills);
+        const pauseableSkills = pauseable.actions;
+        const taskPromiseKit = makePromiseKit();
+        const task = {
+            label: taskLabel,
+            start: async () => {
+                const taskPromise = taskFn(pauseableSkills, agent, ...args);
+                taskPromiseKit.resolve(taskPromise);
+                return taskPromiseKit.promise;
+            },
+            pause: async () => {
+                pauseable.pause();
+                agent.interruptBot();
+            },
+            resume: async () => {
+                pauseable.resume();
+            },
+            whenDone: () => {
+                return taskPromiseKit.promise;
+            }
+        }
+        // run task
+        // TODO: fix call
+        const code_return = await agent.tasks._executeTask(task);
+        if (code_return.interrupted && !code_return.timedout)
+            return;
+        return code_return.message;
+    }
+}
+
+function makeActionTaskRunner (taskLabel, taskFn) {
+    return async (agent, ...args) => {
+        // build task
+        const taskFinalizationPromiseKit = makePromiseKit();
+        let currentTaskPromise = null;
+        const setCurrentTaskPromise = (taskPromise) => {
+            if (currentTaskPromise) {
+                // ignore errors from previous task
+                currentTaskPromise.catch(() => {});
+            }
+            currentTaskPromise = taskPromise;
+            if (!taskPromise) return;
+            taskPromise.finally(() => {
+                if (taskPromise !== currentTaskPromise) return;
+                taskFinalizationPromiseKit.resolve(taskPromise);
+            });
         };
-        const code_return = await agent.tasks.runTask(`action:${taskLabel}`, taskFnWithAgent, { timeout, resume });
+        const task = {
+            label: taskLabel,
+            resultLog: '',
+            start: async () => {
+                const taskPromise = taskFn(skills, agent, ...args);
+                setCurrentTaskPromise(taskPromise);
+                return taskFinalizationPromiseKit.promise;
+            },
+            pause: async () => {
+                // we want to discard the current task first
+                // so we can ignore the errors from interrupting it
+                setCurrentTaskPromise(undefined);
+                agent.interruptBot();
+            },
+            resume: async () => {
+                if (currentTaskPromise) return;
+                const taskPromise = taskFn(skills, agent, ...args);
+                setCurrentTaskPromise(taskPromise);
+            },
+            whenDone: () => {
+                return taskFinalizationPromiseKit.promise;
+            }
+        }
+        // run task
+        // TODO: fix call
+        const code_return = await agent.tasks._executeTask(task);
         if (code_return.interrupted && !code_return.timedout)
             return;
         return code_return.message;
@@ -73,7 +147,7 @@ export const actionsList = [
             'player_name': {type: 'string', description: 'The name of the player to go to.'},
             'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
         },
-        perform: runAsTask('goToPlayer', async (agent, player_name, closeness) => {
+        perform: makeActionTaskRunner('goToPlayer', async (skills, agent, player_name, closeness) => {
             return await skills.goToPlayer(agent.bot, player_name, closeness);
         })
     },
@@ -84,7 +158,7 @@ export const actionsList = [
             'player_name': {type: 'string', description: 'name of the player to follow.'},
             'follow_dist': {type: 'float', description: 'The distance to follow from.', domain: [0, Infinity]}
         },
-        perform: runAsTask('followPlayer', async (agent, player_name, follow_dist) => {
+        perform: makeActionTaskRunner('followPlayer', async (skills, agent, player_name, follow_dist) => {
             await skills.followPlayer(agent.bot, player_name, follow_dist);
         }, true)
     },
@@ -96,7 +170,7 @@ export const actionsList = [
             'closeness': { type: 'float', description: 'How close to get to the block.', domain: [0, Infinity] },
             'search_range': { type: 'float', description: 'The distance to search for the block.', domain: [0, Infinity] }
         },
-        perform: runAsTask('goToBlock', async (agent, type, closeness, range) => {
+        perform: makeActionTaskRunner('goToBlock', async (skills, agent, type, closeness, range) => {
             await skills.goToNearestBlock(agent.bot, type, closeness, range);
         })
     },
@@ -104,7 +178,7 @@ export const actionsList = [
         name: '!moveAway',
         description: 'Move away from the current location in any direction by a given distance.',
         params: {'distance': { type: 'float', description: 'The distance to move away.', domain: [0, Infinity] }},
-        perform: runAsTask('moveAway', async (agent, distance) => {
+        perform: makeActionTaskRunner('moveAway', async (skills, agent, distance) => {
             await skills.moveAway(agent.bot, distance);
         })
     },
@@ -122,7 +196,7 @@ export const actionsList = [
         name: '!goToPlace',
         description: 'Go to a saved location.',
         params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
-        perform: runAsTask('goToPlace', async (agent, name) => {
+        perform: makeActionTaskRunner('goToPlace', async (skills, agent, name) => {
             const pos = agent.memory_bank.recallPlace(name);
             if (!pos) {
             skills.log(agent.bot, `No location named "${name}" saved.`);
@@ -139,7 +213,7 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the item to give.' },
             'num': { type: 'int', description: 'The number of items to give.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('givePlayer', async (agent, player_name, item_name, num) => {
+        perform: makeActionTaskRunner('givePlayer', async (skills, agent, player_name, item_name, num) => {
             await skills.giveToPlayer(agent.bot, item_name, player_name, num);
         })
     },
@@ -147,7 +221,7 @@ export const actionsList = [
         name: '!consume',
         description: 'Eat/drink the given item.',
         params: {'item_name': { type: 'ItemName', description: 'The name of the item to consume.' }},
-        perform: runAsTask('consume', async (agent, item_name) => {
+        perform: makeActionTaskRunner('consume', async (skills, agent, item_name) => {
             await agent.bot.consume(item_name);
             skills.log(agent.bot, `Consumed ${item_name}.`);
         })
@@ -156,7 +230,7 @@ export const actionsList = [
         name: '!equip',
         description: 'Equip the given item.',
         params: {'item_name': { type: 'ItemName', description: 'The name of the item to equip.' }},
-        perform: runAsTask('equip', async (agent, item_name) => {
+        perform: makeActionTaskRunner('equip', async (skills, agent, item_name) => {
             await skills.equip(agent.bot, item_name);
         })
     },
@@ -167,7 +241,7 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the item to put in the chest.' },
             'num': { type: 'int', description: 'The number of items to put in the chest.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('putInChest', async (agent, item_name, num) => {
+        perform: makeActionTaskRunner('putInChest', async (skills, agent, item_name, num) => {
             await skills.putInChest(agent.bot, item_name, num);
         })
     },
@@ -178,7 +252,7 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the item to take.' },
             'num': { type: 'int', description: 'The number of items to take.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('takeFromChest', async (agent, item_name, num) => {
+        perform: makeActionTaskRunner('takeFromChest', async (skills, agent, item_name, num) => {
             await skills.takeFromChest(agent.bot, item_name, num);
         })
     },
@@ -186,7 +260,7 @@ export const actionsList = [
         name: '!viewChest',
         description: 'View the items/counts of the nearest chest.',
         params: { },
-        perform: runAsTask('viewChest', async (agent) => {
+        perform: makeActionTaskRunner('viewChest', async (skills, agent) => {
             await skills.viewChest(agent.bot);
         })
     },
@@ -197,7 +271,7 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the item to discard.' },
             'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('discard', async (agent, item_name, num) => {
+        perform: makeActionTaskRunner('discard', async (skills, agent, item_name, num) => {
             const start_loc = agent.bot.entity.position;
             await skills.moveAway(agent.bot, 5);
             await skills.discard(agent.bot, item_name, num);
@@ -211,8 +285,9 @@ export const actionsList = [
             'type': { type: 'BlockName', description: 'The block type to collect.' },
             'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('collectBlocks', async (agent, type, num) => {
-            await skills.collectBlock(agent.bot, type, num);
+        perform: makeActionTaskRunner('collectBlocks', async (skills, agent, type, num) => {
+            const result = await skills.collectBlock(agent.bot, type, num);
+            console.log('collectBlocks', { result });
         }, false, 10) // 10 minute timeout
     },
     {
@@ -221,10 +296,11 @@ export const actionsList = [
         params: {
             'type': { type: 'BlockName', description: 'The block type to collect.' }
         },
-        perform: runAsTask('collectAllBlocks', async (agent, type) => {
-            let success = await skills.collectBlock(agent.bot, type, 1);
-            if (!success)
-            agent.tasks.cancelResume();
+        perform: makeActionTaskRunner('collectAllBlocks', async (skills, agent, type) => {
+            while (true) {
+                let success = await skills.collectBlock(agent.bot, type, 1);
+                if (!success) break;
+            }
         }, true, 3) // 3 minute timeout
     },
     {
@@ -234,7 +310,7 @@ export const actionsList = [
             'recipe_name': { type: 'ItemName', description: 'The name of the output item to craft.' },
             'num': { type: 'int', description: 'The number of times to craft the recipe. This is NOT the number of output items, as it may craft many more items depending on the recipe.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('craftRecipe', async (agent, recipe_name, num) => {
+        perform: makeActionTaskRunner('craftRecipe', async (skills, agent, recipe_name, num) => {
             await skills.craftRecipe(agent.bot, recipe_name, num);
         })
     },
@@ -245,8 +321,10 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
             'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsTask('smeltItem', async (agent, item_name, num) => {
+        perform: makeActionTaskRunner('smeltItem', async (skills, agent, item_name, num) => {
             let response = await skills.smeltItem(agent.bot, item_name, num);
+            console.log('smeltItem', { response });
+            if (!response.indexOf) return;
             if (response.indexOf('Successfully') !== -1) {
             // there is a bug where the bot's inventory is not updated after smelting
             // only updates after a restart
@@ -259,7 +337,7 @@ export const actionsList = [
         name: '!clearFurnace',
         description: 'Take all items out of the nearest furnace.',
         params: { },
-        perform: runAsTask('clearFurnace', async (agent) => {
+        perform: makeActionTaskRunner('clearFurnace', async (skills, agent) => {
             await skills.clearNearestFurnace(agent.bot);
         })
         },
@@ -267,7 +345,7 @@ export const actionsList = [
         name: '!placeHere',
         description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
         params: {'type': { type: 'BlockName', description: 'The block type to place.' }},
-        perform: runAsTask('placeHere', async (agent, type) => {
+        perform: makeActionTaskRunner('placeHere', async (skills, agent, type) => {
             let pos = agent.bot.entity.position;
             await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
         })
@@ -276,14 +354,14 @@ export const actionsList = [
         name: '!attack',
         description: 'Attack and kill the nearest entity of a given type.',
         params: {'type': { type: 'string', description: 'The type of entity to attack.'}},
-        perform: runAsTask('attack', async (agent, type) => {
+        perform: makeActionTaskRunner('attack', async (skills, agent, type) => {
             await skills.attackNearest(agent.bot, type, true);
         })
     },
     {
         name: '!goToBed',
         description: 'Go to the nearest bed and sleep.',
-        perform: runAsTask('goToBed', async (agent) => {
+        perform: makeActionTaskRunner('goToBed', async (skills, agent) => {
             await skills.goToBed(agent.bot);
         })
     },
@@ -291,14 +369,14 @@ export const actionsList = [
         name: '!activate',
         description: 'Activate the nearest object of a given type.',
         params: {'type': { type: 'BlockName', description: 'The type of object to activate.' }},
-        perform: runAsTask('activate', async (agent, type) => {
+        perform: makeActionTaskRunner('activate', async (skills, agent, type) => {
             await skills.activateNearestBlock(agent.bot, type);
         })
     },
     {
         name: '!stay',
         description: 'Stay in the current location no matter what. Pauses all modes.',
-        perform: runAsTask('stay', async (agent) => {
+        perform: makeActionTaskRunner('stay', async (skills, agent) => {
             await skills.stay(agent.bot);
         })
     },
@@ -325,9 +403,63 @@ export const actionsList = [
         params: {
             'selfPrompt': { type: 'string', description: 'The goal prompt.' },
         },
-        perform: async function (agent, prompt) {
-            agent.self_prompter.start(prompt); // don't await, don't return
-        }
+        perform: makeActionTaskRunner('goal', async (skills, agent, prompt) => {
+            const taskFinalizationPromiseKit = makePromiseKit();
+            let currentTaskPromise = null;
+            const setCurrentTaskPromise = (taskPromise) => {
+                if (currentTaskPromise) {
+                    // ignore errors from previous task
+                    currentTaskPromise.catch(() => {});
+                }
+                currentTaskPromise = taskPromise;
+                if (!taskPromise) return;
+                taskPromise.finally(() => {
+                    if (taskPromise !== currentTaskPromise) return;
+                    taskFinalizationPromiseKit.resolve(taskPromise);
+                });
+            }
+            let selfPrompter;
+            const promptUntilEnd = async (prompt) => {
+                agent.goal = prompt;
+                // manual start
+                selfPrompter.on = true;
+                selfPrompter.prompt = prompt;
+                // loop until stopped
+                while (selfPrompter.on) {
+                    if (selfPrompter.loop_active) {
+                        console.log('!!! Self-prompt loop is already active. Ignoring request.');
+                        return;
+                    }
+                    await selfPrompter.startLoop();
+                }
+            }
+            const task = {
+                label: 'goal',
+                resultLog: '',
+                description: prompt,
+                start: async () => {
+                    selfPrompter = new SelfPrompter(agent);
+                    const taskPromise = promptUntilEnd(prompt);
+                    setCurrentTaskPromise(taskPromise);
+                    return taskFinalizationPromiseKit.promise;
+                },
+                pause: async () => {
+                    setCurrentTaskPromise(undefined);
+                    selfPrompter.stop(false);
+                },
+                resume: async () => {
+                    selfPrompter = new SelfPrompter(agent);
+                    const taskPromise = promptUntilEnd(prompt);
+                    setCurrentTaskPromise(taskPromise);
+                },
+                whenDone: () => {
+                    return taskFinalizationPromiseKit.promise;
+                }
+            }
+            console.log('starting goal', { prompt });
+            // agent.self_prompter.start(prompt); // don't await, don't return
+            agent.tasks._executeTask(task);
+        }),
     },
     {
         name: '!endGoal',

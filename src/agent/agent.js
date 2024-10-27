@@ -21,7 +21,8 @@ export class Agent {
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
-        this.self_prompter = new SelfPrompter(this);
+        // this.self_prompter = new SelfPrompter(this);
+        this.goal = null;
 
         await this.prompter.initExamples();
 
@@ -78,7 +79,7 @@ export class Agent {
                 let prompt = save_data.self_prompt;
                 // add initial message to history
                 this.history.add('system', prompt);
-                this.self_prompter.start(prompt);
+                // this.self_prompter.start(prompt);
             }
             else if (init_message) {
                 this.handleMessage('system', init_message, 2);
@@ -105,6 +106,12 @@ export class Agent {
         this.bot.interrupt_code = false;
     }
 
+    captureBotLogs() {
+        let output = this.bot.output;
+        this.clearBotLogs();
+        return output;
+    }
+
     async cleanChat(message, translate_up_to=-1) {
         let to_translate = message;
         let remainging = '';
@@ -120,9 +127,9 @@ export class Agent {
 
     shutUp() {
         this.shut_up = true;
-        if (this.self_prompter.on) {
-            this.self_prompter.stop(false);
-        }
+        // if (this.self_prompter.on) {
+        //     this.self_prompter.stop(false);
+        // }
     }
 
     async handleMessage(source, message, max_responses=null) {
@@ -156,7 +163,8 @@ export class Agent {
             }
         }
 
-        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up;
+        // const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up;
+        const checkInterrupt = () => this.shut_up;
 
         let behavior_log = this.bot.modes.flushBehaviorLog();
         if (behavior_log.trim().length > 0) {
@@ -171,7 +179,7 @@ export class Agent {
         await this.history.add(source, message);
         this.history.save();
 
-        if (!self_prompt && this.self_prompter.on) // message is from user during self-prompting
+        if (!self_prompt && false) // message is from user during self-prompting
             max_responses = 1; // force only respond to this message, then let self-prompting take over
         for (let i=0; i<max_responses; i++) {
             if (checkInterrupt()) break;
@@ -195,7 +203,7 @@ export class Agent {
                 }
 
                 if (checkInterrupt()) break;
-                this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
+                // this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
 
                 if (settings.verbose_commands) {
                     this.cleanChat(res, res.indexOf(command_name));
@@ -306,7 +314,7 @@ export class Agent {
 
     async update(delta) {
         await this.bot.modes.update();
-        await this.self_prompter.update(delta);
+        // await this.self_prompter.update(delta);
     }
 
     isIdle() {
@@ -317,6 +325,6 @@ export class Agent {
         this.history.add('system', msg);
         this.bot.chat('Goodbye world.')
         this.history.save();
-        process.exit(1);
+        process.exit(456);
     }
 }

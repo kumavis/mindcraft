@@ -74,43 +74,43 @@ const modes = [
             }
         }
     },
-    {
-        name: 'unstuck',
-        description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
-        interrupts: ['all'],
-        on: true,
-        active: false,
-        prev_location: null,
-        distance: 2,
-        stuck_time: 0,
-        last_time: Date.now(),
-        max_stuck_time: 20,
-        update: async function (agent) {
-            if (agent.isIdle()) { 
-                this.prev_location = null;
-                this.stuck_time = 0;
-                return; // don't get stuck when idle
-            }
-            const bot = agent.bot;
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
-                this.stuck_time += (Date.now() - this.last_time) / 1000;
-            }
-            else {
-                this.prev_location = bot.entity.position.clone();
-                this.stuck_time = 0;
-            }
-            if (this.stuck_time > this.max_stuck_time) {
-                say(agent, 'I\'m stuck!');
-                this.stuck_time = 0;
-                execute(this, agent, async () => {
-                    const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
-                    await skills.moveAway(bot, 5);
-                    clearTimeout(crashTimeout);
-                });
-            }
-            this.last_time = Date.now();
-        }
-    },
+    // {
+    //     name: 'unstuck',
+    //     description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
+    //     interrupts: ['all'],
+    //     on: true,
+    //     active: false,
+    //     prev_location: null,
+    //     distance: 2,
+    //     stuck_time: 0,
+    //     last_time: Date.now(),
+    //     max_stuck_time: 20,
+    //     update: async function (agent) {
+    //         if (agent.isIdle()) { 
+    //             this.prev_location = null;
+    //             this.stuck_time = 0;
+    //             return; // don't get stuck when idle
+    //         }
+    //         const bot = agent.bot;
+    //         if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
+    //             this.stuck_time += (Date.now() - this.last_time) / 1000;
+    //         }
+    //         else {
+    //             this.prev_location = bot.entity.position.clone();
+    //             this.stuck_time = 0;
+    //         }
+    //         if (this.stuck_time > this.max_stuck_time) {
+    //             say(agent, 'I\'m stuck!');
+    //             this.stuck_time = 0;
+    //             execute(this, agent, async () => {
+    //                 const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
+    //                 await skills.moveAway(bot, 5);
+    //                 clearTimeout(crashTimeout);
+    //             });
+    //         }
+    //         this.last_time = Date.now();
+    //     }
+    // },
     {
         name: 'cowardice',
         description: 'Run away from enemies. Interrupts all actions.',
@@ -257,8 +257,8 @@ const modes = [
 ];
 
 async function execute(mode, agent, func, timeout=-1) {
-    if (agent.self_prompter.on)
-        agent.self_prompter.stopLoop();
+    // if (agent.self_prompter.on)
+    //     agent.self_prompter.stopLoop();
     mode.active = true;
     let code_return = await agent.tasks.runTask(`mode:${mode.name}`, async () => {
         await func();
@@ -291,11 +291,19 @@ class ModeController {
     }
 
     pause(mode_name) {
-        this.modes_map[mode_name].paused = true;
+        const mode = this.modes_map[mode_name]
+        if (!mode) {
+            throw new Error(`Mode ${mode_name} does not exist.`);
+        }
+        mode.paused = true;
     }
 
     unpause(mode_name) {
-        this.modes_map[mode_name].paused = false;
+        const mode = this.modes_map[mode_name]
+        if (!mode) {
+            throw new Error(`Mode ${mode_name} does not exist.`);
+        }
+        mode.paused = false;
     }
 
     unPauseAll() {
